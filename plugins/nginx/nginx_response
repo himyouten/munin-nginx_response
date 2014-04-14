@@ -1,0 +1,316 @@
+#!/usr/bin/env python
+"""
+nginx_response
+
+Gives munin results for cache status, HTTP response code, unique ips
+
+Requires that nginx access logs have $upstream_cache_status as the last column
+
+Requires logsince to parse the logs
+
+The parse_script should reference the munin plugin
+
+User configurable stuff
+[nginx_response]
+  env.logsince_script /usr/local/sbin/logsince
+  env.access_log /var/log/nginx/access.log
+  env.parse_script /usr/share/munin/plugins/nginx_response
+  env.domains www.vice.com m.vice.com
+
+Created by Him You Ten on 2014-04-03.
+
+The MIT License (MIT)
+
+Copyright (c) 2014 himyouten
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+"""
+import sys, os
+import re, urlparse
+import operator
+import collections
+
+# logsince location
+logsince_script = os.environ.get('logsince_script', '/usr/local/sbin/logsince')
+# access log location
+access_log = os.environ.get('access_log', '/var/log/nginx/access.log')
+# nginx_response location
+parse_script = os.environ.get('parse_script', '/usr/share/munin/plugins/nginx_response')
+# domains
+domains_str = os.environ.get('domains', '')
+domains = []
+if len(domains_str) > 0:
+    domains = domains_str.split()
+    domains.append('OTHER')
+
+stats = {
+    'response_codes_ok': { 'graph_title':'Nginx HTTP normal responses', 'codes':[ '200', '301', '302', '304' ] },
+    'response_codes_error': { 'graph_title':'Nginx HTTP error responses', 'codes':[ '401', '403', '404', '499', '500', 'OTHER' ] },
+    'cache_codes_hit': { 'graph_title':'Nginx Cache HIT status', 'codes':[ 'OTHER', 'HIT' ] },
+    'cache_codes_other': { 'graph_title':'Nginx Cache other status', 'codes':[ 'MISS', 'BYPASS', 'EXPIRED', 'STALE', 'UPDATING', 'REVALIDATED' ] },
+}
+
+def string_fix(s):
+    return re.sub(r"[^a-zA-Z0-9_]", "_", s)
+
+def failed_config():
+    print "failed.label FAILED %s" % sys.argv[0]
+    print "failed.vlabel ffffailed!!!1"
+    print "failed.info Fake field indicating we were unable to connect."
+    print "failed.critical 1:"
+
+def failed_fetch():
+    print "failed.value 0"
+
+def get_domain(url):
+    result = urlparse.urlparse(url)
+    return result.netloc
+
+def configure():
+    # config for response codes and cache status stats
+    for name, config in stats.iteritems():
+        # the summary graph
+        print "multigraph nginx_%s" % (string_fix(name))
+        print "graph_category nginx"
+        print "graph_args --base 1000 -l 0"
+        print "graph_scale no"
+        print "graph_title %s" % (config['graph_title'])
+        for stat in config['codes']:
+            print "%s.label %s" % (string_fix(stat), stat)
+            print "%s.info Hit count" % (string_fix(stat))
+            print "%s.type GAUGE" % (string_fix(stat))
+        print
+        # the graphs per domain (if set)
+        for domain in domains:
+            print "multigraph nginx_%s.%s" % (string_fix(name), string_fix(domain))
+            print "graph_category nginx"
+            print "graph_args --base 1000 -l 0"
+            print "graph_scale no"
+            print "graph_title %s for %s" % (config['graph_title'], domain)
+            for stat in config['codes']:
+                print "%s.label %s" % (string_fix(stat), stat)
+                print "%s.info Hit count" % (string_fix(stat))
+                print "%s.type GAUGE" % (string_fix(stat))
+            print
+    # the unique ips
+    print "multigraph nginx_unique_ips"
+    print "graph_category nginx"
+    print "graph_args --base 1000 -l 0"
+    print "graph_scale no"
+    print "graph_title Nginx unique IPs"
+    print "count.label count"
+    print "count.info Count"
+    print "count.type GAUGE"
+    print
+    # uniques per domain
+    for domain in domains:
+        print "multigraph nginx_unique_ips.%s" % (string_fix(domain))
+        print "graph_category nginx"
+        print "graph_args --base 1000 -l 0"
+        print "graph_scale no"
+        print "graph_title Nginx unique IPs for %s" % (domain)
+        print "count.label count"
+        print "count.info Count"
+        print "count.type GAUGE"
+        print
+    
+    # top ips
+    print "multigraph nginx_top_ips"
+    print "graph_category nginx"
+    print "graph_args --base 1000 -l 0"
+    print "graph_scale no"
+    print "graph_title Nginx top IPs hits"
+    for i in range(5):
+        stat = 'hit_per_ip_%s' % (str(i))
+        print "%s.label %s" % (string_fix(stat), stat)
+        print "%s.info Count" % (string_fix(stat))
+        print "%s.type GAUGE" % (string_fix(stat))
+    print
+    # tops per domain
+    for domain in domains:
+        print "multigraph nginx_top_ips.%s" % (string_fix(domain))
+        print "graph_category nginx"
+        print "graph_args --base 1000 -l 0"
+        print "graph_scale no"
+        print "graph_title Nginx top IPs hits for %s" %  (domain)
+        for i in range(5):
+            stat = 'hit_per_ip_%s' % (str(i))
+            print "%s.label %s" % (string_fix(stat), stat)
+            print "%s.info Count" % (string_fix(stat))
+            print "%s.type GAUGE" % (string_fix(stat))
+        print
+
+def parse(domains=[]):
+    # set up the data to capture
+    responses = set(stats['response_codes_ok']['codes'])|set(stats['response_codes_error']['codes'])
+    cache_statuses = set(stats['cache_codes_hit']['codes'])|set(stats['cache_codes_other']['codes'])
+    response_data = {}
+    response_totals = {}
+    cache_data = {}
+    cache_totals = {}
+    ips_data = {}
+    ips_totals = {}
+    ips_count = {}
+    reqs_per_ips = {}
+    
+    # set has_domains if domains is set
+    if len(domains) > 0:
+        has_domains = True
+        domains.append('OTHER')
+
+    # set defaults
+    for key in responses:
+        response_totals.setdefault(key, 0)
+    for key in cache_statuses:
+        cache_totals.setdefault(key, 0)
+        
+    if has_domains:
+        for domain in domains:
+            response_data.setdefault(domain, response_totals.copy())
+            cache_data.setdefault(domain, cache_totals.copy())
+            ips_data.setdefault(domain, {})
+            ips_count.setdefault(domain, 0)
+            reqs_per_ips.setdefault(domain, [('ip',0)])
+        # response_data.setdefault('OTHER', response_totals.copy())
+        # cache_data.setdefault('OTHER', cache_totals.copy())
+        # ips_data.setdefault('OTHER', {})
+
+    # parse the lines and capture the stats
+    for line in sys.stdin:
+        # split the line and start accumulating the counters
+        cols = line.split()
+        cache_status = cols[-1]
+        response_code = cols[8]
+        ip = cols[0]
+        domain = get_domain(cols[6])
+
+        # do the totals first
+        # do caches first
+        if cache_status in cache_statuses:
+            cache_totals[cache_status] += 1
+        else:
+            cache_totals['OTHER'] += 1
+        # do the responses next
+        if response_code in responses:
+            response_totals[response_code] += 1
+        else:
+            response_totals['OTHER'] += 1
+        # do the ips
+        ips_totals.setdefault(ip,0)
+        ips_totals[ip] += 1
+        
+        # now do for domains
+        if has_domains:
+            # apply it to the domain datas if found, otherwise stick it in OTHER domain
+            if not domain in response_data or len(domain) == 0:
+                domain = 'OTHER'
+
+            # do caches first
+            if cache_status in cache_statuses:
+                cache_data[domain][cache_status] += 1
+            else:
+                cache_data[domain]['OTHER'] += 1
+            # do the responses next
+            if response_code in responses:
+                response_data[domain][response_code] += 1
+            else:
+                response_data[domain]['OTHER'] += 1
+            # do the ips
+            ips_data[domain].setdefault(ip,0)
+            ips_data[domain][ip] += 1
+
+    # sort the unique ips
+    reqs_per_ips_totals = sorted(ips_totals.iteritems(), key=operator.itemgetter(1), reverse=True)
+    for domain in ips_data:
+        reqs_per_ips[domain] = sorted(ips_data[domain].iteritems(), key=operator.itemgetter(1), reverse=True)
+    
+    # print data
+    # start with responses
+    for key in ['response_codes_ok','response_codes_error']:
+        print "multigraph nginx_%s" % string_fix(key)
+        for stat in stats[key]['codes']:
+            value = response_totals.get(stat, '0')
+            print "%s.value %s" % (string_fix(stat), value)
+        print
+        for domain in response_data:
+            print "multigraph nginx_%s.%s" % (string_fix(key), string_fix(domain))
+            for stat in stats[key]['codes']:
+                value = response_data[domain].get(stat, '0')
+                print "%s.value %s" % (string_fix(stat), value)
+            print
+            
+    # then do the caches
+    for key in ['cache_codes_hit','cache_codes_other']:
+        print "multigraph nginx_%s" % string_fix(key)
+        for stat in stats[key]['codes']:
+            value = cache_totals.get(stat, '0')
+            print "%s.value %s" % (string_fix(stat), value)
+        print
+        for domain in cache_data:
+            print "multigraph nginx_%s.%s" % (string_fix(key), string_fix(domain))
+            for stat in stats[key]['codes']:
+                value = cache_data[domain].get(stat, '0')
+                print "%s.value %s" % (string_fix(stat), value)
+            print
+
+    # finally the unique ips
+    ips_count_total = len(ips_totals)
+    print "multigraph nginx_unique_ips"
+    print "count.value %s" % (ips_count_total)
+    print
+    for domain in ips_data:
+        ips_count[domain] = len(ips_data[domain])
+        print "multigraph nginx_unique_ips.%s" % string_fix(domain)
+        print "count.value %s" % (ips_count[domain])
+        print
+    # top ips
+    print "multigraph nginx_top_ips"
+    for i in range(5):
+        stat = 'hit_per_ip_%s' % (str(i))
+        if i < ips_count_total:
+            value = reqs_per_ips_totals[i][1]
+        else:
+            value = 0
+        print "%s.value %s" % (stat, value)
+    print
+    for domain in reqs_per_ips:
+        print "multigraph nginx_top_ips.%s" % string_fix(domain)
+        for i in range(5):
+            stat = 'hit_per_ip_%s' % (str(i))
+            if i < ips_count[domain]:
+                value = reqs_per_ips[domain][i][1]
+            else:
+                value = 0
+            print "%s.value %s" % (stat, value)
+        print
+
+if __name__ == "__main__":
+    if len(sys.argv) >= 2:
+        arguments = collections.deque(sys.argv)
+        # get rid of script name
+        arguments.popleft()
+        # get the action passed
+        action = arguments.popleft()
+        if action == "config":
+            configure()
+        elif action == "parse":
+            parse(arguments)
+    else:
+        cmd = "{0} {1} | {2} parse %s".format(logsince_script, access_log, parse_script, " ".join(domains))
+        os.system(cmd)
