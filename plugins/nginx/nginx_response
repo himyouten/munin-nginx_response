@@ -158,6 +158,7 @@ def configure():
 
 def parse(domains=[]):
     # set up the data to capture
+    has_domains = False
     responses = set(stats['response_codes_ok']['codes'])|set(stats['response_codes_error']['codes'])
     cache_statuses = set(stats['cache_codes_hit']['codes'])|set(stats['cache_codes_other']['codes'])
     response_data = {}
