@@ -60,8 +60,8 @@ if len(domains_str) > 0:
     domains.append('OTHER')
 
 stats = {
-    'response_codes_ok': { 'graph_title':'Nginx HTTP normal responses', 'codes':[ '200', '301', '302', '304' ] },
-    'response_codes_error': { 'graph_title':'Nginx HTTP error responses', 'codes':[ '401', '403', '404', '499', '500', 'OTHER' ] },
+    'response_codes_ok': { 'graph_title':'Nginx HTTP normal responses', 'codes':[ '200', '206', '301', '302', '304', '307' ] },
+    'response_codes_error': { 'graph_title':'Nginx HTTP error responses', 'codes':[ '401', '403', '404', '405', '499', '500', '503', 'OTHER' ] },
     'cache_codes_hit': { 'graph_title':'Nginx Cache HIT status', 'codes':[ 'OTHER', 'HIT' ] },
     'cache_codes_other': { 'graph_title':'Nginx Cache other status', 'codes':[ 'MISS', 'BYPASS', 'EXPIRED', 'STALE', 'UPDATING', 'REVALIDATED' ] },
 }
